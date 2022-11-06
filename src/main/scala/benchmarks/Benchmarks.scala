@@ -9,17 +9,12 @@ import java.util.concurrent.TimeUnit
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Measurement(iterations = 15, timeUnit = TimeUnit.SECONDS, time = 3)
 @Warmup(iterations = 15, timeUnit = TimeUnit.SECONDS, time = 3)
-@Fork(value = 3, jvmArgsAppend = Array("-Dcats.effect.tracing.mode=none"))
+@Fork(value = 3, jvmArgsAppend = Array("-Dcats.effect.tracing.mode=none", "-Dcats.effect.auto.yield.threshold.multiplier=20"))  // zio uses a variable threshold, but roughly 10,240
 @Threads(value = 1)
 class Benchmarks {
 
   val catsEffectRuntime = cats.effect.unsafe.implicits.global
-
-  val zioPlatform = zio.internal.Platform
-    .makeDefault(1024)
-    .withReportFailure(_ => ())
-    .withTracing(zio.internal.Tracing.disabled)
-  val zioRuntime = zio.Runtime.unsafeFromLayer(zio.ZEnv.live, zioPlatform)
+  val zioRuntime = zio.Runtime.default
 
   @Benchmark
   def catsEffect3RuntimeChainedFork(): Int = {
@@ -244,11 +239,11 @@ class Benchmarks {
 
   @Benchmark
   def zio2SchedulerChainedFork(): Int = {
-    import zio.{Promise, UIO, ZIO}
+    import zio.{Promise, ZIO}
 
     def zioChainedFork(): Int = {
 
-      def iterate(promise: Promise[Nothing, Unit], n: Int): UIO[Any] =
+      def iterate(promise: Promise[Nothing, Unit], n: Int): ZIO[Any, Nothing, Any] =
         if (n <= 0) promise.succeed(())
         else ZIO.unit.flatMap(_ => iterate(promise, n - 1).forkDaemon)
 
@@ -292,7 +287,7 @@ class Benchmarks {
 
   @Benchmark
   def zio2SchedulerPingPong(): Int = {
-    import zio.{Promise, Queue, Ref, UIO, ZIO}
+    import zio.{Promise, Queue, Ref, ZIO}
 
     def zioPingPong(): Int = {
 
@@ -300,7 +295,7 @@ class Benchmarks {
         if (n <= 1) zio
         else zio *> repeat(n - 1)(zio)
 
-      def iterate(promise: Promise[Nothing, Unit], n: Int): UIO[Any] =
+      def iterate(promise: Promise[Nothing, Unit], n: Int): ZIO[Any, Nothing, Any] =
         for {
           ref <- Ref.make(n)
           queue <- Queue.bounded[Unit](1)
@@ -328,11 +323,11 @@ class Benchmarks {
 
   @Benchmark
   def zio2EnqueueDequeue(): Unit = {
-    import zio.{UIO, Queue}
+    import zio.{ZIO, Queue}
 
-    def loop(q: Queue[Unit], i: Int): UIO[Unit] =
+    def loop(q: Queue[Unit], i: Int): ZIO[Any, Nothing, Unit] =
       if (i >= 10000)
-        UIO.unit
+        ZIO.unit
       else
         q.offer(()).flatMap(_ => q.take.flatMap(_ => loop(q, i + 1)))
 
@@ -368,12 +363,12 @@ class Benchmarks {
 
   @Benchmark
   def zio2DeepBind(): Unit = {
-    import zio.UIO
+    import zio.ZIO
 
-    def loop(i: Int): UIO[Unit] =
-      UIO.unit.flatMap { _ =>
+    def loop(i: Int): ZIO[Any, Nothing, Unit] =
+      ZIO.unit.flatMap { _ =>
         if (i > 10000)
-          UIO.unit
+          ZIO.unit
         else
           loop(i + 1)
       }
@@ -384,25 +379,25 @@ class Benchmarks {
   @Benchmark
   @OutputTimeUnit(TimeUnit.MINUTES)
   def zio2Scheduling(): Int = {
-    import zio.UIO
+    import zio.ZIO
 
     def schedulingBenchmark(): Int = {
-      def fiber(i: Int): UIO[Int] =
-        UIO.yieldNow.flatMap { _ =>
-          UIO(i).flatMap { j =>
-            UIO.yieldNow.flatMap { _ =>
+      def fiber(i: Int): ZIO[Any, Throwable, Int] =
+        ZIO.yieldNow.flatMap { _ =>
+          ZIO.from(i).flatMap { j =>
+            ZIO.yieldNow.flatMap { _ =>
               if (j > 10000)
-                UIO.yieldNow.flatMap(_ => UIO(j))
+                ZIO.yieldNow.flatMap(_ => ZIO.from(j))
               else
-                UIO.yieldNow.flatMap(_ => fiber(j + 1))
+                ZIO.yieldNow.flatMap(_ => fiber(j + 1))
             }
           }
         }
 
-      val io = UIO
+      val io = ZIO
         .foreach(List.range(0, 1000000))(n => fiber(n).forkDaemon)
         .flatMap { list =>
-          UIO.foreach(list)(_.join)
+          ZIO.foreach(list)(_.join)
         }
         .map(_.sum)
 
@@ -415,11 +410,11 @@ class Benchmarks {
   @Benchmark
   @OutputTimeUnit(TimeUnit.MINUTES)
   def zio2Alloc(): Int = {
-    import zio.UIO
+    import zio.ZIO
 
     def alloc(): Int = {
-      def allocation(n: Int): UIO[Array[AnyRef]] =
-        UIO {
+      def allocation(n: Int) =
+        ZIO from {
           val size = math.max(100, math.min(n, 2000))
           val array = new Array[AnyRef](size)
           for (i <- (0 until size)) {
@@ -428,27 +423,27 @@ class Benchmarks {
           array
         }
 
-      def sum(array: Array[AnyRef]): UIO[Int] =
-        UIO {
+      def sum(array: Array[AnyRef]) =
+        ZIO from {
           array.map(_.hashCode()).sum
         }
 
-      def fiber(i: Int): UIO[Int] =
-        UIO.yieldNow.flatMap { _ =>
+      def fiber(i: Int): ZIO[Any, Throwable, Int] =
+        ZIO.yieldNow.flatMap { _ =>
           allocation(i).flatMap { arr =>
-            UIO.yieldNow.flatMap(_ => sum(arr)).flatMap { _ =>
+            ZIO.yieldNow.flatMap(_ => sum(arr)).flatMap { _ =>
               if (i > 1000)
-                UIO.yieldNow.flatMap(_ => UIO(i))
+                ZIO.yieldNow.flatMap(_ => ZIO.from(i))
               else
-                UIO.yieldNow.flatMap(_ => fiber(i + 1))
+                ZIO.yieldNow.flatMap(_ => fiber(i + 1))
             }
           }
         }
 
-      val io = UIO
+      val io = ZIO
         .foreach(List.range(0, 2500))(_ => fiber(0).forkDaemon)
         .flatMap { list =>
-          UIO.foreach(list)(_.join)
+          ZIO.foreach(list)(_.join)
         }
         .map(_.sum)
 
@@ -463,6 +458,6 @@ class Benchmarks {
   private[this] def runCatsEffect3[A](io: cats.effect.IO[A]): A =
     (cats.effect.IO.cede.flatMap(_ => io)).unsafeRunSync()(catsEffectRuntime)
 
-  private[this] def runZIO[A](io: zio.UIO[A]): A =
-    zioRuntime.unsafeRun(zio.UIO.yieldNow.flatMap(_ => io))
+  private[this] def runZIO[A](io: zio.ZIO[Any, Throwable, A]): A =
+    zio.Unsafe.unsafe(implicit u => zioRuntime.unsafe.run(zio.ZIO.yieldNow.flatMap(_ => io)).getOrThrow)
 }
